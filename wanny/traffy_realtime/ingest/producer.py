@@ -12,14 +12,15 @@ producer = KafkaProducer(
     value_serializer=lambda d: json.dumps(d, ensure_ascii=False).encode()
 )
 
-msg = {
-    "ticket_id": str(uuid.uuid4()),
-    "comment":   random.choice(["ทางเท้าชำรุด", "ไฟถนนดับ", "ถังขยะล้น"]),
-    "type":      random.choice(["ถนน/ทางเท้า", "ไฟฟ้าและแสงสว่าง"]),
-    "coords":    "100.60802,13.80367",
-    "timestamp": datetime.datetime.utcnow().isoformat(timespec="seconds"),
-}
+for _ in range(3):
+    msg = {
+        "ticket_id": str(uuid.uuid4()),
+        "comment":   random.choice(["ถังขยะไม่พอใช้", "น้ำขังบนถนน", "ไฟถนนกะพริบ", "ไฟถนนดับ", "ขยะเต็มถัง"]),
+        "type":      random.choice(["ขยะ", "น้ำท่วม", "ไฟฟ้าและแสงสว่าง", "ถนน/ทางเท้า"]),
+        "coords":    random.choice(["100.500,13.750", "100.589,13.811", "100.634,13.727", "100.611,13.879"]),
+        "timestamp": datetime.datetime.utcnow().isoformat(timespec="seconds"),
+    }
+    producer.send(TOPIC, msg).get(timeout=10)
+    print("pushed", msg["ticket_id"])
 
-producer.send(TOPIC, msg).get(timeout=10)
 producer.flush()
-print("pushed", msg["ticket_id"])

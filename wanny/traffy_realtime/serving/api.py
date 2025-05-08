@@ -18,6 +18,8 @@ class TicketRequest(BaseModel):
 def predict(req: TicketRequest):
     hkey = f"feat:{req.ticket_id}"
     feats = rds.hgetall(hkey)
+    print("HKEY:", hkey)
+    print("FEATS:", feats)
     if not feats:
         raise HTTPException(404, "features not found")
     print("FEATS:", feats)
