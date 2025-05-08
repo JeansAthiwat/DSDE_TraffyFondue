@@ -163,9 +163,7 @@ def analyze_with_llm(prediction_result, context_data, ticket_data):
             )
 
         # Create prompt template with enhanced context evaluation
-        template = (
-            template
-        ) = """
+        template = """
         You are a smart assistant that analyzes urban issue tickets and their resolution predictions.
 
         TICKET INFORMATION:
