@@ -5,15 +5,17 @@ services:
     image: confluentinc/cp-zookeeper:7.5.0
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
+    networks:
+      - app-net
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     depends_on: [zookeeper]
+    networks:
+      - app-net
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-
-      # one port inside cluster, one for the host
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >
         PLAINTEXT:PLAINTEXT,
         PLAINTEXT_HOST:PLAINTEXT
@@ -21,17 +23,19 @@ services:
         PLAINTEXT://kafka:9092,
         PLAINTEXT_HOST://localhost:29092
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      # single-broker convenience
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-
     ports:
-      - "29092:29092" # expose host listener only
+      - "29092:29092"
+    expose:
+      - "9092"
 
   redis:
     image: redis:7.0-alpine
     ports: ["6379:6379"]
+    networks:
+      - app-net
 
   fe_app:
     build: .
@@ -39,3 +43,9 @@ services:
     depends_on: [kafka, redis]
     environment:
       KAFKA_BROKER: kafka:9092
+      REDIS_HOST: redis
+    networks:
+      - app-net
+
+networks:
+  app-net:
