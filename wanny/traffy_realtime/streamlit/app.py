@@ -440,8 +440,8 @@ def scraper_thread_func(redis_conn):
                 fetch_air_quality(redis_conn, driver)
                 fetch_holiday(redis_conn)
 
-                # Sleep for 30 seconds as requested
-                time.sleep(30)
+                # Sleep for 24 hours before the next run
+                time.sleep(24 * 60 * 60)  # 3 hours
             except Exception as e:
                 error_msg = f"⚠️ Error in scraper thread: {e}"
                 print(error_msg)
