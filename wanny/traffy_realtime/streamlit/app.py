@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from datetime import timedelta
 
 import os
 from langchain_google_genai import GoogleGenerativeAI
@@ -86,7 +87,6 @@ def get_context_data_for_ticket(redis_client, ticket_data):
     return context_data
 
 
-# Add a function to analyze with LLM
 def analyze_with_llm(prediction_result, context_data, ticket_data):
     """
     Use LangChain and Gemini to analyze the prediction and context
@@ -95,40 +95,116 @@ def analyze_with_llm(prediction_result, context_data, ticket_data):
         # Initialize the LLM
         llm = GoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.0)
 
-        # Create prompt template
-        template = """
+        # Calculate date/time information
+        current_time = datetime.now()
+        formatted_current_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
+
+        start_minutes = int(prediction_result.get("start_in_minutes", 0))
+        resolve_minutes = int(prediction_result.get("resolve_minutes", 0))
+
+        predicted_start_time = current_time + timedelta(minutes=start_minutes)
+        formatted_start_time = predicted_start_time.strftime("%Y-%m-%d %H:%M:%S")
+
+        predicted_resolve_time = predicted_start_time + timedelta(
+            minutes=resolve_minutes
+        )
+        formatted_resolve_time = predicted_resolve_time.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Check if predicted start time falls within working hours (8AM-6PM Thai time)
+        start_hour = predicted_start_time.hour
+        is_working_hours = 8 <= start_hour <= 18
+        working_hours_status = (
+            "within normal working hours"
+            if is_working_hours
+            else "outside normal working hours"
+        )
+
+        # Check if the predicted start date is a holiday
+        start_date_str = predicted_start_time.strftime("%Y-%m-%d")
+        holiday_name = rds.get(f"holiday:{start_date_str}")
+        holiday_status = (
+            f"falls on a holiday: {holiday_name}"
+            if holiday_name
+            else "is not a holiday"
+        )
+
+        # Calculate geolocation information
+        ticket_lat = float(ticket_data.get("grid_y", 0)) * CELL_SIZE
+        ticket_lon = float(ticket_data.get("grid_x", 0)) * CELL_SIZE
+
+        # Get all weather, AQI, and holiday data to find the most relevant information
+        all_weather_keys = rds.keys("weather:*")
+        all_aqi_keys = rds.keys("aqi:*")
+        all_holiday_keys = rds.keys("holiday:*")
+
+        # Enhanced context gathering for more precise analysis
+        enhanced_context = {"weather": [], "air_quality": [], "holidays": []}
+
+        # Get weather for the relevant date and all available provinces
+        for key in all_weather_keys:
+            if start_date_str in key:
+                try:
+                    weather_data = json.loads(rds.get(key))
+                    enhanced_context["weather"].append(weather_data)
+                except:
+                    pass
+
+        # Get all available AQI data for potential location matching
+        for key in all_aqi_keys:
+            enhanced_context["air_quality"].append(
+                {"location": key.split(":")[-1], "pm25": rds.get(key)}
+            )
+
+        # Get nearby holidays (previous and upcoming)
+        for key in sorted(all_holiday_keys):
+            date_part = key.split(":")[-1]
+            enhanced_context["holidays"].append(
+                {"date": date_part, "name": rds.get(key)}
+            )
+
+        # Create prompt template with enhanced context evaluation
+        template = (
+            template
+        ) = """
         You are a smart assistant that analyzes urban issue tickets and their resolution predictions.
-        We already have a prediction for the ticket resolution time, and we want you to analyze it based on the context data.
-        whether the prediction is reasonable or not.
-        
-        gives professional and practical analysis.
-        Please answer the following questions based on the provided data:
-        1. is the data todo it reasonable considering the weather, air quality, and holiday included?
-        2. What factors might delay or speed up this resolution?
-        3. Provide a brief 2-3 sentence explanation of your analysis.
-        Please keep your answer brief and practical.
-        
+
         TICKET INFORMATION:
         - Ticket ID: {ticket_id}
         - Type: {ticket_type}
         - Text: {ticket_text}
-        - Location: Grid coordinates x={grid_x}, y={grid_y}
-        
-        PREDICTION:
-        - Start handling in: {start_minutes} minutes
-        - Expected resolution time: {resolve_minutes} minutes
-        
+        - Location: grid coordinates x={grid_x}, y={grid_y} (lat: {ticket_lat}, lon: {ticket_lon})
+
+        DATE AND TIME INFORMATION:
+        - Current date/time: {current_time}
+        - Predicted start time: {start_time} (in {start_minutes} minutes)
+        - The predicted start time is {working_hours_status} and {holiday_status}
+        - Predicted resolution time: {resolve_time} (estimated {resolve_minutes} minutes)
+
         CONTEXT DATA:
-        Weather: {weather_info}
-        Air Quality: {air_quality_info}
-        Holiday: {holiday_info}
-        
-        Based on the above information, please analyze:
-        1. Is the predicted resolution time reasonable given the context?
-        2. What factors might delay or speed up this resolution?
-        3. Provide a brief 2-3 sentence explanation of your analysis.
-        
-        Keep your answer brief and practical.
+        - Weather: {weather_info}
+        - Air quality: {air_quality_info}
+        - Holiday: {holiday_info}
+        - Enhanced context: {enhanced_context}
+
+        Based on the above information, first determine which weather station and air quality sensor location is most relevant to this ticket, and use that data in your analysis.
+
+        Please analyze:
+        1. **Start-time feasibility:**
+        - Does it fall within working hours (08:00–18:00)?
+        - Does it fall on a holiday?
+        - How do current or forecasted weather conditions affect feasibility?
+        - Do current air quality levels pose health concerns?
+        - Suggest a better start time if needed.
+
+        2. **Resolution-time assessment:**
+        - Is the estimated {resolve_minutes} minutes reasonable for this issue type?
+        - Could weather conditions slow down the resolution?
+        - Could air quality conditions impact worker safety or efficiency?
+        - Could holiday or weekend status affect workforce availability?
+        - Suggest improvements if needed.
+
+        3. **Recommendation (3–4 sentences):**
+        Assume the role of a government officer and provide a concise, practical summary with next steps.
         """
 
         prompt = PromptTemplate(
@@ -138,11 +214,19 @@ def analyze_with_llm(prediction_result, context_data, ticket_data):
                 "ticket_text",
                 "grid_x",
                 "grid_y",
+                "ticket_lat",
+                "ticket_lon",
+                "current_time",
+                "start_time",
+                "resolve_time",
                 "start_minutes",
                 "resolve_minutes",
                 "weather_info",
                 "air_quality_info",
                 "holiday_info",
+                "working_hours_status",
+                "holiday_status",
+                "enhanced_context",
             ],
             template=template,
         )
@@ -157,8 +241,13 @@ def analyze_with_llm(prediction_result, context_data, ticket_data):
             ticket_text=ticket_data.get("text", "No description"),
             grid_x=ticket_data.get("grid_x", "Unknown"),
             grid_y=ticket_data.get("grid_y", "Unknown"),
-            start_minutes=prediction_result.get("start_in_minutes", "Unknown"),
-            resolve_minutes=prediction_result.get("resolve_minutes", "Unknown"),
+            ticket_lat=ticket_lat,
+            ticket_lon=ticket_lon,
+            current_time=formatted_current_time,
+            start_time=formatted_start_time,
+            resolve_time=formatted_resolve_time,
+            start_minutes=start_minutes,
+            resolve_minutes=resolve_minutes,
             weather_info=(
                 json.dumps(context_data.get("weather", {}), ensure_ascii=False)
                 if context_data.get("weather")
@@ -170,6 +259,9 @@ def analyze_with_llm(prediction_result, context_data, ticket_data):
                 else "No air quality data available"
             ),
             holiday_info=context_data.get("holiday", "Not a holiday"),
+            working_hours_status=working_hours_status,
+            holiday_status=holiday_status,
+            enhanced_context=json.dumps(enhanced_context, ensure_ascii=False),
         )
 
         return result
