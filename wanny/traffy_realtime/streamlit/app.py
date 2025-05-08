@@ -15,6 +15,172 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 
+import os
+from langchain_google_genai import GoogleGenerativeAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+
+# Set your Google API key (you should ideally put this in an .env file)
+os.environ["GOOGLE_API_KEY"] = (
+    "AIzaSyCjfzIgu2KAYY2zK-MJu4bAiAhMXarAulE"  # Replace with your actual key
+)
+CELL_SIZE = 0.01  # Example cell size (you MUST set this to your real CELL_SIZE used when you created grid_x, grid_y)
+
+
+# Add this cached function near your other functions
+@st.cache_data(ttl=3600)  # Cache results for 1 hour
+def get_cached_analysis(ticket_id, prediction_result, context_data, ticket_data):
+    """
+    Cached wrapper for the LLM analysis to avoid repeated API calls
+    """
+    # Log that we're generating a new analysis (will only show when cache misses)
+    print(f"🤖 Generating new analysis for ticket {ticket_id}...")
+    return analyze_with_llm(prediction_result, context_data, ticket_data)
+
+
+### jeans added
+# Add this function to get context data from Redis
+def get_context_data_for_ticket(redis_client, ticket_data):
+    """
+    Fetch relevant contextual data from Redis based on ticket information
+    """
+    context_data = {"weather": None, "air_quality": None, "holiday": None}
+
+    # Get current date for context
+    current_date = datetime.now().strftime("%Y-%m-%d")
+
+    # Find the nearest province based on coordinates (simplified approach)
+    # In a real implementation, you'd calculate distance to find the closest province
+    bangkok_coords = [100.5018, 13.7563]  # Default to Bangkok if no coords available
+    province = "Bangkok"  # Default province
+
+    if "grid_x" in ticket_data and "grid_y" in ticket_data:
+        # Convert grid coordinates to approximate lat/lon
+        lon = float(ticket_data.get("grid_x", 0)) * CELL_SIZE
+        lat = float(ticket_data.get("grid_y", 0)) * CELL_SIZE
+
+        # Here you could use a more sophisticated approach to find nearest province
+        # For simplicity, we're just using Bangkok
+
+    # Get weather data for the province and date
+    weather_key = f"weather:{current_date}:{province}"
+    weather_data = redis_client.get(weather_key)
+    if weather_data:
+        context_data["weather"] = json.loads(weather_data)
+
+    # Get air quality data for the province
+    # Find a matching AQI entry for the location
+    aqi_keys = redis_client.keys(f"aqi:*{province}*")
+    if aqi_keys and len(aqi_keys) > 0:
+        aqi_key = aqi_keys[0]
+        context_data["air_quality"] = {
+            "location": aqi_key.split(":")[-1],
+            "pm25": redis_client.get(aqi_key),
+        }
+
+    # Check if today is a holiday
+    holiday = redis_client.get(f"holiday:{current_date}")
+    if holiday:
+        context_data["holiday"] = holiday
+
+    return context_data
+
+
+# Add a function to analyze with LLM
+def analyze_with_llm(prediction_result, context_data, ticket_data):
+    """
+    Use LangChain and Gemini to analyze the prediction and context
+    """
+    try:
+        # Initialize the LLM
+        llm = GoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.0)
+
+        # Create prompt template
+        template = """
+        You are a smart assistant that analyzes urban issue tickets and their resolution predictions.
+        We already have a prediction for the ticket resolution time, and we want you to analyze it based on the context data.
+        whether the prediction is reasonable or not.
+        
+        gives professional and practical analysis.
+        Please answer the following questions based on the provided data:
+        1. is the data todo it reasonable considering the weather, air quality, and holiday included?
+        2. What factors might delay or speed up this resolution?
+        3. Provide a brief 2-3 sentence explanation of your analysis.
+        Please keep your answer brief and practical.
+        
+        TICKET INFORMATION:
+        - Ticket ID: {ticket_id}
+        - Type: {ticket_type}
+        - Text: {ticket_text}
+        - Location: Grid coordinates x={grid_x}, y={grid_y}
+        
+        PREDICTION:
+        - Start handling in: {start_minutes} minutes
+        - Expected resolution time: {resolve_minutes} minutes
+        
+        CONTEXT DATA:
+        Weather: {weather_info}
+        Air Quality: {air_quality_info}
+        Holiday: {holiday_info}
+        
+        Based on the above information, please analyze:
+        1. Is the predicted resolution time reasonable given the context?
+        2. What factors might delay or speed up this resolution?
+        3. Provide a brief 2-3 sentence explanation of your analysis.
+        
+        Keep your answer brief and practical.
+        """
+
+        prompt = PromptTemplate(
+            input_variables=[
+                "ticket_id",
+                "ticket_type",
+                "ticket_text",
+                "grid_x",
+                "grid_y",
+                "start_minutes",
+                "resolve_minutes",
+                "weather_info",
+                "air_quality_info",
+                "holiday_info",
+            ],
+            template=template,
+        )
+
+        # Create the chain
+        chain = LLMChain(llm=llm, prompt=prompt)
+
+        # Run the chain
+        result = chain.run(
+            ticket_id=ticket_data.get("ticket_id", "Unknown"),
+            ticket_type=ticket_data.get("type", "Unknown"),
+            ticket_text=ticket_data.get("text", "No description"),
+            grid_x=ticket_data.get("grid_x", "Unknown"),
+            grid_y=ticket_data.get("grid_y", "Unknown"),
+            start_minutes=prediction_result.get("start_in_minutes", "Unknown"),
+            resolve_minutes=prediction_result.get("resolve_minutes", "Unknown"),
+            weather_info=(
+                json.dumps(context_data.get("weather", {}), ensure_ascii=False)
+                if context_data.get("weather")
+                else "No weather data available"
+            ),
+            air_quality_info=(
+                json.dumps(context_data.get("air_quality", {}), ensure_ascii=False)
+                if context_data.get("air_quality")
+                else "No air quality data available"
+            ),
+            holiday_info=context_data.get("holiday", "Not a holiday"),
+        )
+
+        return result
+
+    except Exception as e:
+        return f"Error generating analysis: {str(e)}"
+
+
+### end jeans added
+
+
 st.set_page_config(layout="wide")
 st.title("Realtime Traffy Reports (from Redis) + Prediction")
 
@@ -296,6 +462,7 @@ st.sidebar.header("Predict Ticket Resolution Time")
 
 ticket_id_input = st.sidebar.text_input("Ticket ID")
 
+# Then replace the prediction section with this code
 if ticket_id_input:
     try:
         response = requests.post(
@@ -306,6 +473,41 @@ if ticket_id_input:
             st.sidebar.success(f"Prediction for Ticket ID {ticket_id_input}")
             st.sidebar.write(f"Start In Minutes: {result['start_in_minutes']}")
             st.sidebar.write(f"Resolve Minutes: {result['resolve_minutes']}")
+
+            # Get ticket data from Redis
+            ticket_key = f"feat:{ticket_id_input}"
+            ticket_data = rds.hgetall(ticket_key)
+
+            if ticket_data:
+                # Get contextual data
+                context_data = get_context_data_for_ticket(rds, ticket_data)
+
+                # Use the cached analysis function instead of direct call with spinner
+                analysis = get_cached_analysis(
+                    ticket_id_input, result, context_data, ticket_data
+                )
+
+                # Display the analysis
+                st.sidebar.subheader("AI Analysis")
+                st.sidebar.info(analysis)
+
+                # Display the context data used
+                with st.sidebar.expander("Context Data Used"):
+                    if context_data["weather"]:
+                        st.write(
+                            "**Weather:**",
+                            context_data["weather"]["weather"],
+                            f"({context_data['weather']['rain']})",
+                        )
+                    if context_data["air_quality"]:
+                        st.write(
+                            "**Air Quality (PM2.5):**",
+                            context_data["air_quality"]["pm25"],
+                        )
+                    if context_data["holiday"]:
+                        st.write("**Holiday:**", context_data["holiday"])
+            else:
+                st.sidebar.warning("Could not find ticket data for analysis")
         else:
             st.sidebar.error(f"Ticket ID not found or error occurred.")
     except Exception as e:
